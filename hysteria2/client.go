@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"slices"
 	"sync"
 	"time"
 
@@ -113,6 +114,9 @@ func NewClient(options ClientOptions) (*Client, error) {
 		}
 		if options.RealmOptions.IPVersion != 0 && options.RealmOptions.IPVersion != 4 && options.RealmOptions.IPVersion != 6 {
 			return nil, E.New("invalid IP version: ", options.RealmOptions.IPVersion)
+		}
+		if options.RealmOptions.IPVersion == 6 && options.RealmOptions.PortMapping != nil {
+			return nil, E.New("port mapping requires IPv4")
 		}
 	}
 	if options.GeckoPassword != "" {
@@ -300,9 +304,46 @@ func (c *Client) offerNewRealm(ctx context.Context) (*clientQUICConnection, erro
 	if err != nil {
 		return nil, err
 	}
+	var (
+		portMapper   *realm.PortMapper
+		mappedFamily *realmFamilyConn
+	)
+	if c.realmOptions.PortMapping != nil {
+		for _, family := range families {
+			if !family.ipv4 {
+				continue
+			}
+			// The mapping is established before STUN discovery: with the pinhole
+			// in place, in a double-NAT setup, the address STUN observes
+			// corresponds to a path whose inner leg goes through the static
+			// mapping rather than a filtered dynamic one.
+			mapper, mapErr := realm.NewPortMapper(ctx, c.logger, M.SocksaddrFromNet(family.conn.LocalAddr()).Port, *c.realmOptions.PortMapping)
+			if mapErr != nil {
+				c.logger.Warn(E.Cause(mapErr, "port mapping unavailable; continuing without it"))
+			} else {
+				portMapper = mapper
+				mappedFamily = family
+			}
+			break
+		}
+	}
+	mapperAdopted := false
+	if portMapper != nil {
+		defer func() {
+			if !mapperAdopted {
+				_ = portMapper.Close()
+			}
+		}()
+	}
 	surviving, localAddresses, err := c.realmDiscoverFamilies(ctx, families)
 	if err != nil {
 		return nil, err
+	}
+	if portMapper != nil && slices.Contains(surviving, mappedFamily) {
+		externalAddr := portMapper.ExternalAddr()
+		if !slices.Contains(localAddresses, externalAddr) {
+			localAddresses = append(localAddresses, externalAddr)
+		}
 	}
 	closeSurviving := func() {
 		for _, family := range surviving {
@@ -330,7 +371,15 @@ func (c *Client) offerNewRealm(ctx context.Context) (*clientQUICConnection, erro
 		packetConn = NewSalamanderConn(packetConn, []byte(c.salamanderPassword))
 	}
 	peerAddr := M.SocksaddrFromNetIP(result.PeerAddr)
-	return c.authenticateAndWrap(ctx, packetConn, peerAddr)
+	conn, err := c.authenticateAndWrap(ctx, packetConn, peerAddr)
+	if err != nil {
+		return nil, err
+	}
+	if winner == mappedFamily {
+		mapperAdopted = true
+		go portMapper.KeepAlive(conn.connDone)
+	}
+	return conn, nil
 }
 
 func (c *Client) realmOpenFamilies(ctx context.Context) ([]*realmFamilyConn, error) {
