@@ -14,6 +14,7 @@ import (
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
+	M "github.com/sagernet/sing/common/metadata"
 
 	"golang.org/x/sync/singleflight"
 )
@@ -36,6 +37,7 @@ type Options struct {
 	Resolver    Resolver
 	Logger      logger.Logger
 	IPVersion   int
+	PortMapping *PortMappingOptions
 }
 
 type Server struct {
@@ -43,6 +45,7 @@ type Server struct {
 	controlClient *ControlClient
 	punchConn     *PunchPacketConn
 	puncher       *ServerPuncher
+	portMapper    *PortMapper
 	cancel        context.CancelFunc
 	done          chan struct{}
 	resetSignal   chan struct{}
@@ -77,6 +80,9 @@ func NewServer(options Options) (*Server, error) {
 	}
 	if options.IPVersion != 0 && options.IPVersion != 4 && options.IPVersion != 6 {
 		return nil, E.New("invalid IP version: ", options.IPVersion)
+	}
+	if options.IPVersion == 6 && options.PortMapping != nil {
+		return nil, E.New("port mapping requires IPv4")
 	}
 	return &Server{
 		options:       options,
@@ -117,6 +123,19 @@ func (s *Server) Close() error {
 }
 
 func (s *Server) run(ctx context.Context) {
+	if s.options.PortMapping != nil {
+		// The mapping is established before the first STUN discovery: with the
+		// pinhole in place, in a double-NAT setup, the address STUN observes
+		// corresponds to a path whose inner leg goes through the static mapping
+		// rather than a filtered dynamic one.
+		mapper, err := NewPortMapper(ctx, s.options.Logger, M.SocksaddrFromNet(s.punchConn.LocalAddr()).Port, *s.options.PortMapping)
+		if err != nil {
+			s.options.Logger.Warn(E.Cause(err, "port mapping unavailable; continuing without it"))
+		} else {
+			s.portMapper = mapper
+			go mapper.KeepAlive(ctx.Done())
+		}
+	}
 	eventStreamDone := make(chan struct{})
 	go func() {
 		defer close(eventStreamDone)
@@ -255,6 +274,17 @@ func (s *Server) readEvents(ctx context.Context, stream *EventStream, streamDone
 	}
 }
 
+func (s *Server) mergeMappedAddress(addresses []netip.AddrPort) []netip.AddrPort {
+	if s.portMapper == nil {
+		return addresses
+	}
+	externalAddr := s.portMapper.ExternalAddr()
+	if !externalAddr.IsValid() || slices.Contains(addresses, externalAddr) {
+		return addresses
+	}
+	return append(addresses, externalAddr)
+}
+
 func (s *Server) cachedAddresses() []netip.AddrPort {
 	s.addressAccess.RLock()
 	defer s.addressAccess.RUnlock()
@@ -281,7 +311,7 @@ func (s *Server) resolvedSTUNServers(ctx context.Context) ([]netip.AddrPort, err
 func (s *Server) connectAddresses(ctx context.Context) ([]netip.AddrPort, error) {
 	cached := s.cachedAddresses()
 	if cached != nil {
-		return cached, nil
+		return s.mergeMappedAddress(cached), nil
 	}
 	value, err, _ := s.connectFlight.Do("stun", func() (any, error) {
 		recheck := s.cachedAddresses()
@@ -307,11 +337,11 @@ func (s *Server) connectAddresses(ctx context.Context) ([]netip.AddrPort, error)
 		fallback := slices.Clone(s.addresses)
 		s.addressAccess.RUnlock()
 		if len(fallback) > 0 {
-			return fallback, err
+			return s.mergeMappedAddress(fallback), err
 		}
 		return nil, err
 	}
-	return value.([]netip.AddrPort), nil
+	return s.mergeMappedAddress(value.([]netip.AddrPort)), nil
 }
 
 func (s *Server) handleHeartbeat(ctx context.Context) {
@@ -328,9 +358,10 @@ func (s *Server) handleHeartbeat(ctx context.Context) {
 		return
 	}
 	s.addressAccess.RLock()
+	current := s.mergeMappedAddress(slices.Clone(s.addresses))
 	var publish []netip.AddrPort
-	if !slices.Equal(s.addresses, s.lastPublishedAddresses) {
-		publish = slices.Clone(s.addresses)
+	if !slices.Equal(current, s.lastPublishedAddresses) {
+		publish = current
 	}
 	s.addressAccess.RUnlock()
 	ttl, err := s.controlClient.Heartbeat(ctx, s.options.RealmID, sessionID, publish)
@@ -387,7 +418,7 @@ func (s *Server) handleReset(ctx context.Context) {
 
 func (s *Server) reRegister(ctx context.Context) {
 	s.addressAccess.RLock()
-	addresses := slices.Clone(s.addresses)
+	addresses := s.mergeMappedAddress(slices.Clone(s.addresses))
 	s.addressAccess.RUnlock()
 	registration, err := s.controlClient.Register(ctx, s.options.RealmID, addresses)
 	if err != nil {
