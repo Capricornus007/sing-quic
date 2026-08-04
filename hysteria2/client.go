@@ -53,6 +53,7 @@ type ClientOptions struct {
 	QUICOptions        qtls.QUICOptions
 	UDPDisabled        bool
 	BBRProfile         string
+	ChromeParrot       bool
 	RealmOptions       *realm.Options
 }
 
@@ -94,6 +95,7 @@ func NewClient(options ClientOptions) (*Client, error) {
 		MaxConnectionReceiveWindow:     hysteria.DefaultConnReceiveWindow,
 		MaxIdleTimeout:                 hysteria.DefaultMaxIdleTimeout,
 		KeepAlivePeriod:                hysteria.DefaultKeepAlivePeriod,
+		ChromeParrot:                   options.ChromeParrot,
 	}
 	qtls.ApplyQUICOptions(quicConfig, options.QUICOptions)
 	if len(options.TLSConfig.NextProtos()) == 0 {
