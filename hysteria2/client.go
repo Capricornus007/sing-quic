@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/sagernet/quic-go"
-	"github.com/sagernet/quic-go/congestion"
 	"github.com/sagernet/quic-go/http3"
 	qtls "github.com/sagernet/sing-quic"
 	congestion_meta2 "github.com/sagernet/sing-quic/congestion_meta2"
@@ -583,7 +582,7 @@ func (c *Client) authenticateAndWrap(ctx context.Context, packetConn net.PacketC
 		}
 		quicConn.SetCongestionControl(congestion_meta2.NewBbrSenderWithProfile(
 			congestion_meta2.DefaultClock{TimeFunc: timeFunc},
-			congestion.ByteCount(quicConn.Config().InitialPacketSize),
+			quicConn.InitialPacketSize(),
 			c.bbrProfile,
 		))
 	}
