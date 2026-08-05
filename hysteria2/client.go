@@ -22,7 +22,6 @@ import (
 	"github.com/sagernet/sing-quic/hysteria2/internal/protocol"
 	"github.com/sagernet/sing-quic/hysteria2/realm"
 	"github.com/sagernet/sing/common"
-	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
@@ -257,7 +256,7 @@ func (c *Client) offerNew(ctx context.Context) (*clientQUICConnection, error) {
 		hopCtx = context.Background()
 	}
 	firstDial := true
-	dialFunc := func(serverAddr M.Socksaddr) (net.PacketConn, error) {
+	dialFunc := func(serverAddr M.Socksaddr) (net.Conn, error) {
 		currentCtx := hopCtx
 		if firstDial {
 			// The initial socket open belongs to the shared offer. Later port hops
@@ -269,28 +268,35 @@ func (c *Client) offerNew(ctx context.Context) (*clientQUICConnection, error) {
 		if err != nil {
 			return nil, err
 		}
-		var packetConn net.PacketConn
-		packetConn = bufio.NewUnbindPacketConn(udpConn)
-		if c.geckoPassword != "" {
-			packetConn = NewGeckoConn(packetConn, []byte(c.geckoPassword), c.geckoMinPacketSize, c.geckoMaxPacketSize)
-		} else if c.salamanderPassword != "" {
-			packetConn = NewSalamanderConn(packetConn, []byte(c.salamanderPassword))
+		if c.geckoPassword == "" && c.salamanderPassword == "" {
+			return udpConn, nil
 		}
-		return packetConn, nil
+		if c.geckoPassword != "" {
+			return NewGeckoClientConn(udpConn, []byte(c.geckoPassword), c.geckoMinPacketSize, c.geckoMaxPacketSize), nil
+		}
+		return NewSalamanderClientConn(udpConn, []byte(c.salamanderPassword)), nil
 	}
 	var (
-		packetConn net.PacketConn
-		err        error
+		rawConn net.Conn
+		err     error
 	)
 	if len(c.serverPorts) == 0 {
-		packetConn, err = dialFunc(c.serverAddr)
+		rawConn, err = dialFunc(c.serverAddr)
+		if err != nil {
+			return nil, err
+		}
+		if c.geckoPassword != "" || c.salamanderPassword != "" {
+			qtls.SetDesiredBufferSizes(rawConn)
+		}
 	} else {
-		packetConn, err = hysteria.NewHopPacketConn(dialFunc, c.serverAddr, c.serverPorts, c.hopInterval, c.hopIntervalMax)
+		rawConn, err = hysteria.NewHopConn(dialFunc, c.serverAddr, c.serverPorts, c.hopInterval, c.hopIntervalMax)
+		if err != nil {
+			return nil, err
+		}
 	}
-	if err != nil {
-		return nil, err
-	}
-	return c.authenticateAndWrap(ctx, packetConn, c.serverAddr)
+	return c.authenticateAndWrap(ctx, rawConn, func(quicConnPtr **quic.Conn) (http.RoundTripper, error) {
+		return qtls.CreateTransport(rawConn, quicConnPtr, c.tlsConfig, c.quicConfig)
+	})
 }
 
 type realmFamilyConn struct {
@@ -366,13 +372,18 @@ func (c *Client) offerNewRealm(ctx context.Context) (*clientQUICConnection, erro
 		return nil, err
 	}
 	packetConn := winner.conn
+	if c.geckoPassword != "" || c.salamanderPassword != "" {
+		qtls.SetDesiredBufferSizes(packetConn)
+	}
 	if c.geckoPassword != "" {
 		packetConn = NewGeckoConn(packetConn, []byte(c.geckoPassword), c.geckoMinPacketSize, c.geckoMaxPacketSize)
 	} else if c.salamanderPassword != "" {
 		packetConn = NewSalamanderConn(packetConn, []byte(c.salamanderPassword))
 	}
 	peerAddr := M.SocksaddrFromNetIP(result.PeerAddr)
-	conn, err := c.authenticateAndWrap(ctx, packetConn, peerAddr)
+	conn, err := c.authenticateAndWrap(ctx, packetConn, func(quicConnPtr **quic.Conn) (http.RoundTripper, error) {
+		return qtls.CreatePacketTransport(packetConn, peerAddr.UDPAddr(), quicConnPtr, c.tlsConfig, c.quicConfig)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -531,11 +542,11 @@ func (c *Client) realmRacePunch(
 	return nil, realm.PunchResult{}, E.Cause(E.Errors(errs...), "realm punch")
 }
 
-func (c *Client) authenticateAndWrap(ctx context.Context, packetConn net.PacketConn, peerAddr M.Socksaddr) (*clientQUICConnection, error) {
+func (c *Client) authenticateAndWrap(ctx context.Context, rawConn io.Closer, createTransport func(quicConnPtr **quic.Conn) (http.RoundTripper, error)) (*clientQUICConnection, error) {
 	var quicConn *quic.Conn
-	http3Transport, err := qtls.CreateTransport(packetConn, &quicConn, peerAddr, c.tlsConfig, c.quicConfig)
+	http3Transport, err := createTransport(&quicConn)
 	if err != nil {
-		packetConn.Close()
+		rawConn.Close()
 		return nil, err
 	}
 	request := &http.Request{
@@ -559,7 +570,7 @@ func (c *Client) authenticateAndWrap(ctx context.Context, packetConn net.PacketC
 		if quicConn != nil {
 			quicConn.CloseWithError(0, "")
 		}
-		packetConn.Close()
+		rawConn.Close()
 		return nil, err
 	}
 	response.Body.Close()
@@ -567,7 +578,7 @@ func (c *Client) authenticateAndWrap(ctx context.Context, packetConn net.PacketC
 		if quicConn != nil {
 			quicConn.CloseWithError(0, "")
 		}
-		packetConn.Close()
+		rawConn.Close()
 		return nil, E.New("authentication failed, status code: ", response.StatusCode)
 	}
 	authResponse := protocol.AuthResponseFromHeader(response.Header)
@@ -590,7 +601,7 @@ func (c *Client) authenticateAndWrap(ctx context.Context, packetConn net.PacketC
 	}
 	conn := &clientQUICConnection{
 		quicConn:    quicConn,
-		rawConn:     packetConn,
+		rawConn:     rawConn,
 		connDone:    make(chan struct{}),
 		udpDisabled: !authResponse.UDPEnabled,
 		udpConnMap:  make(map[uint32]*udpPacketConn),

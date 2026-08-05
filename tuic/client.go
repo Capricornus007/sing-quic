@@ -13,7 +13,6 @@ import (
 	qtls "github.com/sagernet/sing-quic"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
-	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -166,9 +165,9 @@ func (c *Client) offerNew(ctx context.Context) (*clientQUICConnection, error) {
 	}
 	var quicConn *quic.Conn
 	if c.zeroRTTHandshake {
-		quicConn, err = qtls.DialEarly(ctx, bufio.NewUnbindPacketConn(udpConn), udpConn.RemoteAddr(), c.tlsConfig, c.quicConfig)
+		quicConn, err = qtls.DialEarly(ctx, udpConn, c.tlsConfig, c.quicConfig)
 	} else {
-		quicConn, err = qtls.Dial(ctx, bufio.NewUnbindPacketConn(udpConn), udpConn.RemoteAddr(), c.tlsConfig, c.quicConfig)
+		quicConn, err = qtls.Dial(ctx, udpConn, c.tlsConfig, c.quicConfig)
 	}
 	if err != nil {
 		udpConn.Close()

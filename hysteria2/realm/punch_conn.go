@@ -5,7 +5,6 @@ import (
 	"net"
 	"net/netip"
 	"sync"
-	"syscall"
 
 	"github.com/sagernet/sing-quic/hysteria2/internal/stun"
 	M "github.com/sagernet/sing/common/metadata"
@@ -40,13 +39,6 @@ func NewPunchPacketConn(conn net.PacketConn, eventBuffer int) *PunchPacketConn {
 		events:     make(chan PunchPacketEvent, eventBuffer),
 		stunEvents: make(chan STUNPacketEvent, eventBuffer),
 	}
-}
-
-func (c *PunchPacketConn) SyscallConn() (syscall.RawConn, error) {
-	if c.udp == nil {
-		return nil, errors.ErrUnsupported
-	}
-	return c.udp.SyscallConn()
 }
 
 func (c *PunchPacketConn) SetReadBuffer(bytes int) error {

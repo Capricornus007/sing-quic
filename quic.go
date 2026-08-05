@@ -5,11 +5,13 @@ import (
 	"crypto/tls"
 	"net"
 	"net/http"
+	"syscall"
 	"time"
 
 	"github.com/sagernet/quic-go"
 	"github.com/sagernet/quic-go/http3"
-	M "github.com/sagernet/sing/common/metadata"
+	"github.com/sagernet/sing/common"
+	N "github.com/sagernet/sing/common/network"
 	aTLS "github.com/sagernet/sing/common/tls"
 )
 
@@ -24,9 +26,10 @@ type QUICOptions struct {
 }
 
 type Config interface {
-	Dial(ctx context.Context, conn net.PacketConn, addr net.Addr, config *quic.Config) (*quic.Conn, error)
-	DialEarly(ctx context.Context, conn net.PacketConn, addr net.Addr, config *quic.Config) (*quic.Conn, error)
-	CreateTransport(conn net.PacketConn, quicConnPtr **quic.Conn, serverAddr M.Socksaddr, quicConfig *quic.Config) http.RoundTripper
+	Dial(ctx context.Context, conn net.Conn, config *quic.Config) (*quic.Conn, error)
+	DialEarly(ctx context.Context, conn net.Conn, config *quic.Config) (*quic.Conn, error)
+	CreateTransport(conn net.Conn, quicConnPtr **quic.Conn, quicConfig *quic.Config) http.RoundTripper
+	CreatePacketTransport(conn net.PacketConn, remoteAddr net.Addr, quicConnPtr **quic.Conn, quicConfig *quic.Config) http.RoundTripper
 }
 
 type ServerConfig interface {
@@ -73,6 +76,52 @@ func ApplyQUICOptions(quicConfig *quic.Config, options QUICOptions) {
 	}
 }
 
+func SetDesiredBufferSizes(conn any) {
+	// quic-go's internal protocol.DesiredReceiveBufferSize and protocol.DesiredSendBufferSize.
+	const desiredUDPBufferSize = 8 << 20
+	readCapable, canSetReadBuffer := common.Cast[interface {
+		SetReadBuffer(bytes int) error
+	}](conn)
+	if canSetReadBuffer {
+		_ = readCapable.SetReadBuffer(desiredUDPBufferSize)
+	}
+	writeCapable, canSetWriteBuffer := common.Cast[interface {
+		SetWriteBuffer(bytes int) error
+	}](conn)
+	if canSetWriteBuffer {
+		_ = writeCapable.SetWriteBuffer(desiredUDPBufferSize)
+	}
+}
+
+type syscallConn struct {
+	net.Conn
+	socket syscall.Conn
+}
+
+func (c *syscallConn) SyscallConn() (syscall.RawConn, error) {
+	return c.socket.SyscallConn()
+}
+
+func (c *syscallConn) Upstream() any {
+	return c.Conn
+}
+
+func (c *syscallConn) ReaderReplaceable() bool {
+	return true
+}
+
+func (c *syscallConn) WriterReplaceable() bool {
+	return true
+}
+
+func withSyscallConn(conn net.Conn) net.Conn {
+	socket, isSyscallConn := N.UnwrapReader(conn).(syscall.Conn)
+	if !isSyscallConn {
+		return conn
+	}
+	return &syscallConn{Conn: conn, socket: socket}
+}
+
 func quicConfigWithHandshakeTimeout(quicConfig *quic.Config, handshakeTimeout time.Duration) *quic.Config {
 	if handshakeTimeout <= 0 {
 		return quicConfig
@@ -87,39 +136,42 @@ func quicConfigWithHandshakeTimeout(quicConfig *quic.Config, handshakeTimeout ti
 	return quicConfig
 }
 
-func Dial(ctx context.Context, conn net.PacketConn, addr net.Addr, config aTLS.Config, quicConfig *quic.Config) (*quic.Conn, error) {
+func Dial(ctx context.Context, conn net.Conn, config aTLS.Config, quicConfig *quic.Config) (*quic.Conn, error) {
+	conn = withSyscallConn(conn)
 	quicConfig = quicConfigWithHandshakeTimeout(quicConfig, config.HandshakeTimeout())
 	if quicTLSConfig, isQUICConfig := config.(Config); isQUICConfig {
-		quicConn, err := quicTLSConfig.Dial(ctx, conn, addr, quicConfig)
+		quicConn, err := quicTLSConfig.Dial(ctx, conn, quicConfig)
 		return quicConn, WrapError(err)
 	}
 	tlsConfig, err := config.STDConfig()
 	if err != nil {
 		return nil, err
 	}
-	quicConn, err := quic.Dial(ctx, conn, addr, tlsConfig, quicConfig)
+	quicConn, err := quic.DialConn(ctx, conn, tlsConfig, quicConfig)
 	return quicConn, WrapError(err)
 }
 
-func DialEarly(ctx context.Context, conn net.PacketConn, addr net.Addr, config aTLS.Config, quicConfig *quic.Config) (*quic.Conn, error) {
+func DialEarly(ctx context.Context, conn net.Conn, config aTLS.Config, quicConfig *quic.Config) (*quic.Conn, error) {
+	conn = withSyscallConn(conn)
 	quicConfig = quicConfigWithHandshakeTimeout(quicConfig, config.HandshakeTimeout())
 	if quicTLSConfig, isQUICConfig := config.(Config); isQUICConfig {
-		quicConn, err := quicTLSConfig.DialEarly(ctx, conn, addr, quicConfig)
+		quicConn, err := quicTLSConfig.DialEarly(ctx, conn, quicConfig)
 		return quicConn, WrapError(err)
 	}
 	tlsConfig, err := config.STDConfig()
 	if err != nil {
 		return nil, err
 	}
-	quicConn, err := quic.DialEarly(ctx, conn, addr, tlsConfig, quicConfig)
+	quicConn, err := quic.DialEarlyConn(ctx, conn, tlsConfig, quicConfig)
 	return quicConn, WrapError(err)
 }
 
-func CreateTransport(conn net.PacketConn, quicConnPtr **quic.Conn, serverAddr M.Socksaddr, config aTLS.Config, quicConfig *quic.Config) (http.RoundTripper, error) {
+func CreateTransport(conn net.Conn, quicConnPtr **quic.Conn, config aTLS.Config, quicConfig *quic.Config) (http.RoundTripper, error) {
+	conn = withSyscallConn(conn)
 	handshakeTimeout := config.HandshakeTimeout()
 	quicConfig = quicConfigWithHandshakeTimeout(quicConfig, handshakeTimeout)
 	if quicTLSConfig, isQUICConfig := config.(Config); isQUICConfig {
-		return quicTLSConfig.CreateTransport(conn, quicConnPtr, serverAddr, quicConfig), nil
+		return quicTLSConfig.CreateTransport(conn, quicConnPtr, quicConfig), nil
 	}
 	tlsConfig, err := config.STDConfig()
 	if err != nil {
@@ -130,7 +182,32 @@ func CreateTransport(conn net.PacketConn, quicConnPtr **quic.Conn, serverAddr M.
 		QUICConfig:      quicConfig,
 		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 			cfg = quicConfigWithHandshakeTimeout(cfg, handshakeTimeout)
-			quicConn, err := quic.DialEarly(ctx, conn, serverAddr.UDPAddr(), tlsCfg, cfg)
+			quicConn, err := quic.DialEarlyConn(ctx, conn, tlsCfg, cfg)
+			if err != nil {
+				return nil, WrapError(err)
+			}
+			*quicConnPtr = quicConn
+			return quicConn, nil
+		},
+	}, nil
+}
+
+func CreatePacketTransport(conn net.PacketConn, remoteAddr net.Addr, quicConnPtr **quic.Conn, config aTLS.Config, quicConfig *quic.Config) (http.RoundTripper, error) {
+	handshakeTimeout := config.HandshakeTimeout()
+	quicConfig = quicConfigWithHandshakeTimeout(quicConfig, handshakeTimeout)
+	if quicTLSConfig, isQUICConfig := config.(Config); isQUICConfig {
+		return quicTLSConfig.CreatePacketTransport(conn, remoteAddr, quicConnPtr, quicConfig), nil
+	}
+	tlsConfig, err := config.STDConfig()
+	if err != nil {
+		return nil, err
+	}
+	return &http3.Transport{
+		TLSClientConfig: tlsConfig,
+		QUICConfig:      quicConfig,
+		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+			cfg = quicConfigWithHandshakeTimeout(cfg, handshakeTimeout)
+			quicConn, err := quic.DialEarly(ctx, conn, remoteAddr, tlsCfg, cfg)
 			if err != nil {
 				return nil, WrapError(err)
 			}

@@ -16,7 +16,6 @@ import (
 	qtls "github.com/sagernet/sing-quic"
 	hyCC "github.com/sagernet/sing-quic/hysteria/congestion"
 	"github.com/sagernet/sing/common"
-	"github.com/sagernet/sing/common/bufio"
 	"github.com/sagernet/sing/common/debug"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
@@ -228,7 +227,7 @@ func (c *Client) offerNew(ctx context.Context) (*clientQUICConnection, error) {
 		hopCtx = context.Background()
 	}
 	firstDial := true
-	dialFunc := func(serverAddr M.Socksaddr) (net.PacketConn, error) {
+	dialFunc := func(serverAddr M.Socksaddr) (net.Conn, error) {
 		currentCtx := hopCtx
 		if firstDial {
 			// The initial socket open belongs to the shared offer. Later port hops
@@ -240,28 +239,32 @@ func (c *Client) offerNew(ctx context.Context) (*clientQUICConnection, error) {
 		if err != nil {
 			return nil, err
 		}
-		var packetConn net.PacketConn
-		packetConn = bufio.NewUnbindPacketConn(udpConn)
-		if c.xplusPassword != "" {
-			packetConn = NewXPlusPacketConn(packetConn, []byte(c.xplusPassword))
+		if c.xplusPassword == "" {
+			return udpConn, nil
 		}
-		return packetConn, nil
+		return NewXPlusClientConn(udpConn, []byte(c.xplusPassword)), nil
 	}
 	var (
-		packetConn net.PacketConn
-		err        error
+		rawConn net.Conn
+		err     error
 	)
 	if len(c.serverPorts) == 0 {
-		packetConn, err = dialFunc(c.serverAddr)
+		rawConn, err = dialFunc(c.serverAddr)
+		if err != nil {
+			return nil, err
+		}
+		if c.xplusPassword != "" {
+			qtls.SetDesiredBufferSizes(rawConn)
+		}
 	} else {
-		packetConn, err = NewHopPacketConn(dialFunc, c.serverAddr, c.serverPorts, c.hopInterval, 0)
+		rawConn, err = NewHopConn(dialFunc, c.serverAddr, c.serverPorts, c.hopInterval, 0)
+		if err != nil {
+			return nil, err
+		}
 	}
+	quicConn, err := qtls.Dial(ctx, rawConn, c.tlsConfig, c.quicConfig)
 	if err != nil {
-		return nil, err
-	}
-	quicConn, err := qtls.Dial(ctx, packetConn, c.serverAddr, c.tlsConfig, c.quicConfig)
-	if err != nil {
-		packetConn.Close()
+		rawConn.Close()
 		return nil, err
 	}
 	stopWatch := context.AfterFunc(ctx, func() {
@@ -270,7 +273,7 @@ func (c *Client) offerNew(ctx context.Context) (*clientQUICConnection, error) {
 	defer stopWatch()
 	controlStream, err := quicConn.OpenStreamSync(ctx)
 	if err != nil {
-		packetConn.Close()
+		rawConn.Close()
 		return nil, err
 	}
 	_ = controlStream.SetDeadline(time.Now().Add(ProtocolTimeout))
@@ -280,23 +283,23 @@ func (c *Client) offerNew(ctx context.Context) (*clientQUICConnection, error) {
 		Auth:    c.password,
 	})
 	if err != nil {
-		packetConn.Close()
+		rawConn.Close()
 		return nil, err
 	}
 	serverHello, err := ReadServerHello(controlStream)
 	if err != nil {
-		packetConn.Close()
+		rawConn.Close()
 		return nil, err
 	}
 	_ = controlStream.SetDeadline(time.Time{})
 	if !serverHello.OK {
-		packetConn.Close()
+		rawConn.Close()
 		return nil, E.New("remote error: ", serverHello.Message)
 	}
 	quicConn.SetCongestionControl(hyCC.NewBrutalSender(uint64(math.Min(float64(serverHello.RecvBPS), float64(c.sendBPS))), c.brutalDebug, c.logger))
 	conn := &clientQUICConnection{
 		quicConn:    quicConn,
-		rawConn:     packetConn,
+		rawConn:     rawConn,
 		connDone:    make(chan struct{}),
 		udpDisabled: !(quicConn.ConnectionState().SupportsDatagrams.Local && quicConn.ConnectionState().SupportsDatagrams.Remote),
 		udpConnMap:  make(map[uint32]*udpPacketConn),
