@@ -123,7 +123,7 @@ var (
 
 type udpPacketConn struct {
 	ctx             context.Context
-	cancel          common.ContextCancelCauseFunc
+	cancel          context.CancelCauseFunc
 	sessionID       uint16
 	quicConn        *quic.Conn
 	data            chan *udpMessage
@@ -139,7 +139,7 @@ type udpPacketConn struct {
 }
 
 func newUDPPacketConn(ctx context.Context, quicConn *quic.Conn, udpStream bool, isServer bool, onDestroy func()) *udpPacketConn {
-	ctx, cancel := common.ContextWithCancelCause(ctx)
+	ctx, cancel := context.WithCancelCause(ctx)
 	return &udpPacketConn{
 		ctx:          ctx,
 		cancel:       cancel,

@@ -15,7 +15,6 @@ import (
 	"github.com/sagernet/quic-go"
 	qtls "github.com/sagernet/sing-quic"
 	hyCC "github.com/sagernet/sing-quic/hysteria/congestion"
-	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/debug"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
@@ -171,7 +170,7 @@ func (c *Client) offer(ctx context.Context) (*clientQUICConnection, error) {
 	if offerCtx == nil {
 		offerCtx = context.Background()
 	}
-	offerCtx, cancel := common.ContextWithCancelCause(offerCtx)
+	offerCtx, cancel := context.WithCancelCause(offerCtx)
 	pending = &clientOffer{
 		done:   make(chan struct{}),
 		cancel: cancel,
