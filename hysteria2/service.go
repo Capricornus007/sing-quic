@@ -171,7 +171,11 @@ func (s *Service[U]) Start(conn net.PacketConn) error {
 	if err != nil {
 		return err
 	}
-	listener, err := qtls.Listen(conn, s.tlsConfig, s.quicConfig)
+	obfsEnabled := s.geckoPassword != "" || s.salamanderPassword != ""
+	listener, err := qtls.ListenWithOptions(conn, s.tlsConfig, s.quicConfig, qtls.ListenOptions{
+		DisableVersionNegotiationPackets: obfsEnabled,
+		StatelessReset:                   !obfsEnabled,
+	})
 	if err != nil {
 		return err
 	}
@@ -195,7 +199,11 @@ func (s *Service[U]) startWithRealm(conn net.PacketConn) error {
 	if err != nil {
 		return E.Errors(err, s.realmServer.Close())
 	}
-	listener, err := qtls.Listen(quicConn, s.tlsConfig, s.quicConfig)
+	obfsEnabled := s.geckoPassword != "" || s.salamanderPassword != ""
+	listener, err := qtls.ListenWithOptions(quicConn, s.tlsConfig, s.quicConfig, qtls.ListenOptions{
+		DisableVersionNegotiationPackets: obfsEnabled,
+		StatelessReset:                   !obfsEnabled,
+	})
 	if err != nil {
 		return E.Errors(err, s.realmServer.Close())
 	}

@@ -2,6 +2,7 @@ package qtls
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"net"
 	"net/http"
@@ -217,7 +218,16 @@ func CreatePacketTransport(conn net.PacketConn, remoteAddr net.Addr, quicConnPtr
 	}, nil
 }
 
+type ListenOptions struct {
+	DisableVersionNegotiationPackets bool
+	StatelessReset                   bool
+}
+
 func Listen(conn net.PacketConn, config aTLS.ServerConfig, quicConfig *quic.Config) (Listener, error) {
+	return ListenWithOptions(conn, config, quicConfig, ListenOptions{})
+}
+
+func ListenWithOptions(conn net.PacketConn, config aTLS.ServerConfig, quicConfig *quic.Config, options ListenOptions) (Listener, error) {
 	quicConfig = quicConfigWithHandshakeTimeout(quicConfig, config.HandshakeTimeout())
 	if quicTLSConfig, isQUICConfig := config.(ServerConfig); isQUICConfig {
 		listener, err := quicTLSConfig.Listen(conn, quicConfig)
@@ -227,11 +237,24 @@ func Listen(conn net.PacketConn, config aTLS.ServerConfig, quicConfig *quic.Conf
 	if err != nil {
 		return nil, err
 	}
-	listener, err := quic.Listen(conn, tlsConfig, quicConfig)
+	transport := quic.Transport{Conn: conn, DisableVersionNegotiationPackets: options.DisableVersionNegotiationPackets}
+	transport.SetSingleUse(true)
+	if options.StatelessReset {
+		transport.StatelessResetKey = new(quic.StatelessResetKey)
+		_, err = rand.Read(transport.StatelessResetKey[:])
+		if err != nil {
+			return nil, err
+		}
+	}
+	listener, err := transport.Listen(tlsConfig, quicConfig)
 	return listener, WrapError(err)
 }
 
 func ListenEarly(conn net.PacketConn, config aTLS.ServerConfig, quicConfig *quic.Config) (EarlyListener, error) {
+	return ListenEarlyWithOptions(conn, config, quicConfig, ListenOptions{})
+}
+
+func ListenEarlyWithOptions(conn net.PacketConn, config aTLS.ServerConfig, quicConfig *quic.Config, options ListenOptions) (EarlyListener, error) {
 	quicConfig = quicConfigWithHandshakeTimeout(quicConfig, config.HandshakeTimeout())
 	if quicTLSConfig, isQUICConfig := config.(ServerConfig); isQUICConfig {
 		listener, err := quicTLSConfig.ListenEarly(conn, quicConfig)
@@ -241,7 +264,16 @@ func ListenEarly(conn net.PacketConn, config aTLS.ServerConfig, quicConfig *quic
 	if err != nil {
 		return nil, err
 	}
-	listener, err := quic.ListenEarly(conn, tlsConfig, quicConfig)
+	transport := quic.Transport{Conn: conn, DisableVersionNegotiationPackets: options.DisableVersionNegotiationPackets}
+	transport.SetSingleUse(true)
+	if options.StatelessReset {
+		transport.StatelessResetKey = new(quic.StatelessResetKey)
+		_, err = rand.Read(transport.StatelessResetKey[:])
+		if err != nil {
+			return nil, err
+		}
+	}
+	listener, err := transport.ListenEarly(tlsConfig, quicConfig)
 	return listener, WrapError(err)
 }
 
