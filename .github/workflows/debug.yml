@@ -24,9 +24,9 @@ jobs:
         with:
           fetch-depth: 0
       - name: Setup Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v6
         with:
-          go-version: ^1.24
+          go-version: 1.26.6
       - name: Build
         run: |
           make test
@@ -39,7 +39,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Setup Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v6
         with:
           go-version: ~1.23
         continue-on-error: true
@@ -55,9 +55,9 @@ jobs:
         with:
           fetch-depth: 0
       - name: Setup Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v6
         with:
-          go-version: ^1.24
+          go-version: 1.26.6
         continue-on-error: true
       - name: Build
         run: |
@@ -71,9 +71,9 @@ jobs:
         with:
           fetch-depth: 0
       - name: Setup Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v6
         with:
-          go-version: ^1.24
+          go-version: 1.26.6
         continue-on-error: true
       - name: Build
         run: |
