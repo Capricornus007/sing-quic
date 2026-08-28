@@ -195,10 +195,13 @@ func (c *VectorisedXPlusClientConn) Write(p []byte) (n int, err error) {
 	_, _ = c.rand.Read(salt)
 	c.randAccess.Unlock()
 	key := sha256.Sum256(append(c.key, salt...))
+	payload := buf.NewSize(len(p))
+	defer payload.Release()
+	cipherText := payload.Extend(len(p))
 	for i := range p {
-		p[i] ^= key[i%sha256.Size]
+		cipherText[i] = p[i] ^ key[i%sha256.Size]
 	}
-	_, err = bufio.WriteVectorised(c.writer, [][]byte{header.Bytes(), p})
+	_, err = bufio.WriteVectorised(c.writer, [][]byte{header.Bytes(), cipherText})
 	if err != nil {
 		return
 	}

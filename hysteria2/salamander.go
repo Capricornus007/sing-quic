@@ -175,10 +175,13 @@ func (s *VectorisedSalamanderConn) Write(p []byte) (n int, err error) {
 	defer buffer.Release()
 	buffer.WriteRandom(salamanderSaltLen)
 	key := blake2b.Sum256(append(s.password, buffer.Bytes()...))
+	payload := buf.NewSize(len(p))
+	defer payload.Release()
+	cipherText := payload.Extend(len(p))
 	for i := range p {
-		p[i] ^= key[i%blake2b.Size256]
+		cipherText[i] = p[i] ^ key[i%blake2b.Size256]
 	}
-	_, err = bufio.WriteVectorised(s.writer, [][]byte{buffer.Bytes(), p})
+	_, err = bufio.WriteVectorised(s.writer, [][]byte{buffer.Bytes(), cipherText})
 	if err != nil {
 		return
 	}
