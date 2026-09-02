@@ -1,6 +1,6 @@
 module github.com/sagernet/sing-quic
 
-go 1.27.0
+go 1.27.1
 
 require (
 	github.com/gofrs/uuid/v5 v5.5.1
