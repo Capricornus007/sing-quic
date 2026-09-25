@@ -70,7 +70,9 @@ func NewHopConn(
 	if err != nil {
 		return nil, err
 	}
-	if destination.IsFqdn() {
+	// IsDomain 而非 IsFqdn：後者會把 net.isDomainName 不接受的主機名整段跳過，
+	// 那種情況下目的地仍是名字、核心自己解析，標記漏掉就是這次要修的 bug 同款。
+	if destination.IsDomain() {
 		remoteAddr := M.SocksaddrFromNet(currentConn.RemoteAddr()).Unwrap()
 		if remoteAddr.IsIP() {
 			if remoteAddr.Port != nextAddr.Port {
